@@ -22,15 +22,17 @@ use esp_hal::interrupt::{bind_interrupt, InterruptHandler, Priority};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::{clock::CpuClock, gpio::Output};
 use esp_hal_embassy::InterruptExecutor;
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use sdio_host::common_cmd::R1;
-use sdmmc_host_esp32::{configure_pins, pullup_en_internal, Slot, Width};
+use sdmmc_host_esp32::{configure_pins, configure_pins2, pullup_en_internal, Slot, Width};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     log::error!("[PANIC] info={}", info);
     loop {}
 }
+
+const TAG: &'static str = "[MAIN]";
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -64,7 +66,7 @@ async fn main(spawner: Spawner) {
         OutputConfig::default().with_pull(esp_hal::gpio::Pull::None),
     );
     pullup_en_internal(Slot::Slot1, Width::Bit1).unwrap();
-    configure_pins(true);
+    configure_pins2(true);
 
     // spawner.must_spawn(sdmmc_host_esp32::intr_poller());
 
@@ -77,14 +79,10 @@ async fn main(spawner: Spawner) {
     )
     .await;
 
-    driver.cmd_go_idle_state().await.unwrap();
-
-    loop {
-        let mut out_rca = 0;
-        // let result = driver.cmd_send_op_cond(0x00ff8000, &mut ocrp).await;
-        driver.cmd_send_op_cond(0, &mut 0).await;
-        // driver.cmd_go_idle_state().await.unwrap();
-
-        Timer::after(Duration::from_secs(1)).await;
+    // try init
+    while let Err(err) = driver.init().await {
+        warn!("{TAG} driver init failed with err={err:?}, retry...");
+        Timer::after(Duration::from_secs(1)).await
     }
+    info!("{TAG} Driver initialized!");
 }

@@ -143,3 +143,8 @@ pub const MMC_OCR_2_2V_2_3V: u32 = 1 << 10;
 pub const MMC_OCR_2_1V_2_2V: u32 = 1 << 9;
 pub const MMC_OCR_2_0V_2_1V: u32 = 1 << 8;
 pub const MMC_OCR_1_65V_1_95V: u32 = 1 << 7;
+
+pub const SD_OCR_VOL_MASK: u32 = 0xFF8000;
+pub const SD_OCR_SDHC_CAP: u32 = 1 << 30;
+pub const SD_OCR_XPC: u32 = 1 << 28;
+pub const SD_OCR_S18_RA: u32 = 1 << 24;

@@ -56,12 +56,18 @@ impl SdmmcCard {
     }
 
     pub async fn cmd_send_if_cond(&mut self, ocr: u32) -> Result<(), Error> {
-        const PATTERN: u32 = 0xAA;
+        // const PATTERN: u32 = 0xAA;
+        const PATTERN: u32 = 0;
+
         const SD_OCR_VOL_MASK: u32 = 0xFF8000;
+
+        let arg = u32::from(0b1u32 & 0xF) << 8 | u32::from(PATTERN);
 
         let mut cmd = SdmmcCmd {
             opcode: SD_SEND_IF_COND,
-            arg: ((((ocr & SD_OCR_VOL_MASK) != 0) as u32) << 8) | PATTERN,
+            // arg: ((((ocr & SD_OCR_VOL_MASK) != 0) as u32) << 8) | PATTERN,
+            // arg: 0x0000001AA,
+            arg,
             flags: SCF_CMD_BCR | SCF_RSP_R7,
             ..Default::default()
         };
@@ -78,7 +84,7 @@ impl SdmmcCard {
         }
     }
 
-    pub async fn cmd_send_op_cond(&mut self, ocr: u32, ocrp: &mut u32) -> Result<(), Error> {
+    pub async fn cmd_send_op_cond(&mut self, ocr: u32) -> Result<(), Error> {
         // Setup
         self.sdmmc.set_clk_always_on(self.slot, true);
 
@@ -103,7 +109,7 @@ impl SdmmcCard {
                 } {
                     Ok(_) => {
                         if cmd.responce[0] & MMC_OCR_MEM_READY != 0 || ocr == 0 {
-                            *ocrp = cmd.responce[0];
+                            self.ocr = cmd.responce[0];
                             break 'main Ok(());
                         }
                         Timer::after_millis(10).await
@@ -128,14 +134,14 @@ impl SdmmcCard {
         res
     }
 
-    pub async fn cmd_read_ocr(&mut self, ocrp: &mut u32) -> Result<(), Error> {
+    pub async fn cmd_read_ocr(&mut self) -> Result<(), Error> {
         let mut cmd = SdmmcCmd {
             opcode: SD_READ_OCR,
             flags: SCF_CMD_BCR | SCF_RSP_R2,
             ..Default::default()
         };
         self.send_cmd(&mut cmd).await?;
-        *ocrp = cmd.responce[0];
+        self.ocr = cmd.responce[0];
         Ok(())
     }
 
@@ -150,7 +156,7 @@ impl SdmmcCard {
     }
 
     // cmd_send_cid not supported
-    pub async fn cmd_set_relative_addr(&mut self, out_rca: &mut u16) -> Result<(), Error> {
+    pub async fn cmd_set_relative_addr(&mut self) -> Result<(), Error> {
         let mut cmd = SdmmcCmd {
             opcode: SD_SEND_RELATIVE_ADDR,
             flags: SCF_CMD_BCR | SCF_RSP_R6,
@@ -165,14 +171,14 @@ impl SdmmcCard {
         self.send_cmd(&mut cmd).await?;
 
         if self.is_mmc {
-            *out_rca = mmc_rca as u16;
+            self.rca = mmc_rca as u16;
         } else {
             let mut response_rca = cmd.responce[0] >> 16;
             if response_rca == 0 {
                 self.send_cmd(&mut cmd).await?;
                 response_rca = cmd.responce[0] >> 16;
             }
-            *out_rca = response_rca as u16;
+            self.rca = response_rca as u16;
         }
         Ok(())
     }
@@ -188,6 +194,18 @@ impl SdmmcCard {
     }
 
     pub async fn cmd_send_csd(&mut self) -> Result<(), Error> {
+        let cmd = &mut SdmmcCmd {
+            opcode: MMC_SEND_CSD,
+            arg: (self.rca as u32) << 16,
+            flags: SCF_CMD_AC | SCF_RSP_R2,
+            ..Default::default()
+        };
+
+        self.send_cmd(cmd).await?;
+
+        assert!(!self.is_mmc);
+        let csd = self.decode_csd(cmd);
+        info!("{TAG} csd={csd:?}");
         todo!()
     }
 

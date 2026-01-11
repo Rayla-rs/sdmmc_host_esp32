@@ -24,7 +24,7 @@ use log::trace;
 
 use crate::{gpio::configure_pin_gpio_matrix, inter::Event};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidArg,
     Timeout,
@@ -46,7 +46,7 @@ macro_rules! bit {
     };
 }
 
-pub const SDMMC_FUNC: u8 = 2;
+pub const SDMMC_FUNC: u8 = 3;
 pub const DRIVE_STRENGTH: u8 = 3;
 
 #[macro_export]
@@ -72,6 +72,7 @@ static EVENT_QUEUE: Channel<CriticalSectionRawMutex, Event, 32> = Channel::new()
 static INTR_EVENT: FairSemaphore<CriticalSectionRawMutex, 1> = FairSemaphore::new(0);
 
 const APB_CLK_FREQ: u32 = 80 * 1000000;
+// const APB_CLK_FREQ: u32 = 80 * 10000;
 
 mod inter {
     use embassy_sync::semaphore::Semaphore;
@@ -112,6 +113,11 @@ mod inter {
     pub fn handler() {
         trace!("[SDHOST_INTR] handle");
         let sdmmc = unsafe { SDHOST::steal() };
+
+        info!(
+            "[SDHOST_INTR] rst_n reg value={}",
+            sdmmc.register_block().rst_n().read().card_reset().bits()
+        );
 
         let pending = sdmmc.register_block().mintsts().read().bits() & 0xFFFF;
         sdmmc
@@ -156,8 +162,26 @@ mod inter {
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Slot {
-    Slot0 = 0b01,
-    Slot1 = 0b10,
+    Slot0,
+    Slot1,
+}
+
+impl Slot {
+    #[inline]
+    pub fn num(self) -> u8 {
+        match self {
+            Slot::Slot0 => 0,
+            Slot::Slot1 => 1,
+        }
+    }
+
+    #[inline]
+    pub fn bit(self) -> u8 {
+        match self {
+            Slot::Slot0 => bit!(0),
+            Slot::Slot1 => bit!(1),
+        }
+    }
 }
 
 struct SlotInfo {
@@ -338,7 +362,7 @@ pub fn configure_pins(enable_pullups: bool) {
         }
         w.mcu_ie().set_bit(); // enable input (driver enables input even for CLK)
         w.mcu_oe().set_bit(); // allow peripheral to drive the pad
-        unsafe { w.fun_drv().bits(DRIVE_STRENGTH) }; // optional: set function drive strength
+                              // unsafe { w.fun_drv().bits(DRIVE_STRENGTH) }; // optional: set function drive strength
         unsafe { w.mcu_sel().bits(SDMMC_FUNC) } // select SDMMC IOMUX function
     });
 
@@ -352,7 +376,7 @@ pub fn configure_pins(enable_pullups: bool) {
         }
         w.mcu_ie().set_bit(); // enable input
         w.mcu_oe().set_bit(); // allow peripheral to drive when needed
-        unsafe { w.fun_drv().bits(DRIVE_STRENGTH) };
+                              // unsafe { w.fun_drv().bits(DRIVE_STRENGTH) };
         unsafe { w.mcu_sel().bits(SDMMC_FUNC) }
     });
 
@@ -366,7 +390,42 @@ pub fn configure_pins(enable_pullups: bool) {
         }
         w.mcu_ie().set_bit();
         w.mcu_oe().set_bit();
-        unsafe { w.fun_drv().bits(DRIVE_STRENGTH) };
+        // unsafe { w.fun_drv().bits(DRIVE_STRENGTH) };
         unsafe { w.mcu_sel().bits(SDMMC_FUNC) }
     });
+}
+pub fn configure_pins2(enable_pullups: bool) {
+    let io_mux = unsafe { IO_MUX::steal() };
+    // CLK (GPIO14) - host-driven output but keep input enabled (esp-idf does gpio_input_enable())
+    io_mux.register_block().gpio14().write(|w| {
+        w.mcu_ie().set_bit();
+        w.fun_ie().set_bit();
+        unsafe { w.mcu_sel().bits(SDMMC_FUNC) } // select SDMMC IOMUX function
+    });
+
+    // CMD (GPIO15) - bidirectional
+    io_mux.register_block().gpio15().write(|w| {
+        w.mcu_ie().set_bit();
+        w.fun_ie().set_bit();
+        unsafe { w.mcu_sel().bits(SDMMC_FUNC) } // select SDMMC IOMUX function
+    });
+
+    // D0 (GPIO2) - bidirectional
+    io_mux.register_block().gpio2().write(|w| {
+        w.mcu_ie().set_bit();
+        w.fun_ie().set_bit();
+        unsafe { w.mcu_sel().bits(SDMMC_FUNC) } // select SDMMC IOMUX function
+    });
+
+    {
+        let rtc = unsafe { esp_hal::peripherals::RTC_IO::steal() };
+        let block = rtc.register_block();
+        block.touch_pad2().write(|w| w.rde().clear_bit());
+        block
+            .touch_pad3()
+            .write(|w| w.rde().clear_bit().rue().set_bit());
+        block
+            .touch_pad6()
+            .write(|w| w.rde().clear_bit().rue().set_bit());
+    }
 }

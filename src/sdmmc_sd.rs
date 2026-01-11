@@ -5,9 +5,11 @@ use esp_hal::{
     peripherals::SDHOST,
 };
 use log::{info, warn};
-use sdio_host::{common_cmd::Resp, Cmd};
+use sdio_host::{common_cmd::Resp, sd::SD, Cmd};
 
 pub mod cmd;
+pub mod common;
+pub mod init;
 
 use crate::{
     bit, cmd::SdmmcCmd, common::*, common::*, inter::Event, sdmmc::Sdmmc, Error, Slot, Width,
@@ -22,6 +24,11 @@ pub struct TransState {
     desc_remaining: usize,
 }
 
+struct CSD {
+    pub(crate) sector_size: u32,
+    pub(crate) capacity: u32,
+}
+
 pub struct SdmmcCard {
     sdmmc: Sdmmc,
     slot: Slot,
@@ -31,7 +38,11 @@ pub struct SdmmcCard {
     dma_rx_buf: DmaRxBuf,
     dma_tx_buf: DmaTxBuf,
     rsa: u32,
-    pub(crate) is_mmc: bool, // look at later
+    pub(crate) is_mmc: bool,
+    ocr: u32,
+    pub(crate) raw_cid: [u32; 4],
+    pub(crate) rca: u16,
+    pub(crate) csd: CSD, // look at later
 }
 
 impl SdmmcCard {
@@ -41,7 +52,7 @@ impl SdmmcCard {
         dma_tx_buf: DmaTxBuf,
     ) -> SdmmcCard {
         let mut card = SdmmcCard {
-            sdmmc: Sdmmc { host: sdhost },
+            sdmmc: Sdmmc::new(sdhost),
             slot: Slot::Slot1,
             width: Width::Bit1,
             bus_sampling_mode: BusSamplingMode::SDR,
@@ -49,21 +60,64 @@ impl SdmmcCard {
             dma_rx_buf,
             dma_tx_buf,
             rsa: 0,
+            ocr: 0,
+            raw_cid: [0u32; 4],
+            rca: 0,
+            csd: CSD {
+                sector_size: 0,
+                capacity: 0,
+            },
             is_mmc: false,
         };
         card.sdmmc.init().await.unwrap();
         card
+    }
+
+    pub async fn init_sd_if_cond(&mut self) -> Result<(), Error> {
+        let mut host_ocr = SD_OCR_VOL_MASK;
+        match self.cmd_send_if_cond(host_ocr).await {
+            Ok(_) => {
+                info!("{TAG} SDHC/SDXC card");
+                host_ocr |= SD_OCR_SDHC_CAP;
+            }
+            Err(err) => match err {
+                Error::Timeout => {
+                    info!("{TAG} CMD8 timeout; not an SD v2.00 card");
+                }
+                Error::NotSupported => {
+                    info!("{TAG} CMD8 rejected; not an SD v2.00 card");
+                }
+                _ => {
+                    warn!("{TAG} send_if_cond returned {err:?}");
+                    Err(err)?;
+                }
+            },
+        }
+        self.ocr = host_ocr;
+        Ok(())
+    }
+
+    fn decode_cid(&self) -> Result<(), Error> {
+        let a = sdio_host::sd::CID::<[u32; 4]>::from(self.raw_cid);
+        // sdio_host::emmc::CID::<[u32; 4]>::from(self.raw_cid);
+        todo!()
+    }
+
+    fn mmc_decode_cid(&self) -> Result<(), Error> {
+        todo!()
+    }
+
+    fn decode_csd(&self, cmd: &SdmmcCmd) -> sdio_host::sd::CSD<SD> {
+        sdio_host::sd::CSD::<SD>::from(cmd.responce)
     }
 }
 
 impl SdmmcCard {
     async fn do_transaction(&mut self, cmd_info: &mut SdmmcCmd) -> Result<(), Error> {
         // NOTE critical section is not needed due to ownership
-        let block = self.sdmmc.host.register_block();
+        // let block = self.sdmmc.host.register_block();
 
-        self.sdmmc
-            .set_card_clk(self.slot, &mut self.freq_khz)
-            .await?;
+        self.sdmmc.set_card_clk(self.slot, self.freq_khz).await?;
 
         self.set_bus_width()?;
         self.set_bus_sampling_mode()?;
@@ -311,7 +365,7 @@ impl SdmmcCard {
     }
 
     async fn handle_voltage_switch_stage2(
-        &self,
+        &mut self,
         slot: Slot,
         cmd: &mut SdmmcCmd,
     ) -> Result<(), Error> {
@@ -373,11 +427,11 @@ impl SdmmcCard {
         })
     }
 
-    fn get_real_freq(&self) -> u32 {
-        let host_div = self.sdmmc.get_clock_div();
-        let card_div = self.sdmmc.get_card_clock_div(self.slot);
-        self.sdmmc.calc_freq(host_div, card_div)
-    }
+    // fn get_real_freq(&self) -> u32 {
+    //     let host_div = self.sdmmc.get_clock_div();
+    //     let card_div = self.sdmmc.get_card_clock_div(self.slot);
+    //     self.sdmmc.calc_freq(host_div, card_div)
+    // }
 
     fn dma_prepare(&mut self, data_size: u32, block_size: u32) {
         let prep = self.dma_rx_buf.prepare();
