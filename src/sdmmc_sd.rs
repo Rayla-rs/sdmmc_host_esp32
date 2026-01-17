@@ -1,15 +1,18 @@
 use embassy_futures::yield_now;
+use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_time::{block_for, Duration, WithTimeout};
+use embedded_sdmmc::BlockDevice;
 use esp_hal::{
     dma::{DmaDescriptor, DmaRxBuf, DmaRxBuffer, DmaTxBuf},
     peripherals::SDHOST,
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 use sdio_host::{common_cmd::Resp, sd::SD, Cmd};
 
 pub mod cmd;
 pub mod common;
 pub mod init;
+pub mod io;
 
 use crate::{
     bit, cmd::SdmmcCmd, common::*, common::*, inter::Event, sdmmc::Sdmmc, Error, Slot, Width,
@@ -43,6 +46,40 @@ pub struct SdmmcCard {
     pub(crate) raw_cid: [u32; 4],
     pub(crate) rca: u16,
     pub(crate) csd: CSD, // look at later
+}
+
+pub struct SdmmcDevice(Mutex<CriticalSectionRawMutex, SdmmcCard>);
+
+impl BlockDevice for SdmmcDevice {
+    type Error = Error;
+    fn read(
+        &self,
+        blocks: &mut [embedded_sdmmc::Block],
+        start_block_idx: embedded_sdmmc::BlockIdx,
+    ) -> Result<(), Self::Error> {
+        unsafe {
+            self.0.lock_mut(|card| {
+                embassy_futures::block_on(card.read_sectors(blocks, start_block_idx))
+            })
+        } // :3
+    }
+    fn write(
+        &self,
+        blocks: &[embedded_sdmmc::Block],
+        start_block_idx: embedded_sdmmc::BlockIdx,
+    ) -> Result<(), Self::Error> {
+        unsafe {
+            self.0
+                .lock_mut(|card| embassy_futures::block_on(card.write_sectors()))
+        } // :3
+    }
+    fn num_blocks(&self) -> Result<embedded_sdmmc::BlockCount, Self::Error> {
+        // unsafe {
+        //     self.0
+        //         .lock_mut(|card| embassy_futures::block_on())
+        // } // :3
+        todo!()
+    }
 }
 
 impl SdmmcCard {
@@ -113,32 +150,34 @@ impl SdmmcCard {
 }
 
 impl SdmmcCard {
-    async fn do_transaction(&mut self, cmd_info: &mut SdmmcCmd) -> Result<(), Error> {
+    async fn do_transaction(&mut self, cmd_info: &mut SdmmcCmd<'_>) -> Result<(), Error> {
         // NOTE critical section is not needed due to ownership
         // let block = self.sdmmc.host.register_block();
 
         self.sdmmc.set_card_clk(self.slot, self.freq_khz).await?;
 
-        self.set_bus_width()?;
-        self.set_bus_sampling_mode()?;
-        // NOTE: delay phase -> not supported
-        // NOTE: delay line  -> not supported
-
         // TODO handle idle state events
 
         if cmd_info.opcode == SD_SWITCH_VOLTAGE {
-            self.handle_voltage_switch_stage1(self.slot, cmd_info);
+            self.handle_voltage_switch_stage1(self.slot, cmd_info).await;
         }
 
         let hw_cmd = cmd_info.make_hw_cmd();
         if cmd_info.data.is_some() {
             if cmd_info.datalen >= 4 && cmd_info.datalen % 4 != 0 {
+                warn!(
+                    "{TAG} do_transaction: invalid size: total={}",
+                    cmd_info.datalen
+                );
                 Err(Error::InvalidSize)
             } else {
                 Ok(())
             }?;
 
+            // May need to add alignment check for sanity purposes later here
+
             self.dma_prepare(cmd_info.datalen, cmd_info.blklen);
+            // self.dma_rx_buf.
         }
 
         self.sdmmc
@@ -157,19 +196,23 @@ impl SdmmcCard {
         } else {
             State::SendingCmd
         };
-        while state != State::Idle {
+
+        while state != State::Idle && ret.is_ok() {
             ret = self
                 .handle_event(self.slot, cmd_info, &mut state, &mut unhandled)
                 .await;
-            if ret.is_err() {
-                break;
-            }
         }
+
         if ret.is_ok() && cmd_info.has_flag(SCF_WAIT_BUSY) {
             if !self.wait_for_busy_cleared(cmd_info.timeout_ms).await {
                 info!("{TAG} wait_for_busy_cleared returned false");
                 ret = Err(Error::Timeout);
             }
+        }
+
+        if let Some(buf) = cmd_info.data.as_mut() {
+            let bytes = self.dma_rx_buf.read_received_data(buf);
+            debug!("{TAG} received data with {bytes} bytes left");
         }
 
         ret
@@ -186,7 +229,7 @@ impl SdmmcCard {
     async fn handle_event(
         &mut self,
         slot: Slot,
-        cmd: &mut SdmmcCmd,
+        cmd: &mut SdmmcCmd<'_>,
         state: &mut State,
         unhandled: &mut Event,
     ) -> Result<(), Error> {
@@ -220,7 +263,7 @@ impl SdmmcCard {
     async fn process_events(
         &mut self,
         slot: Slot,
-        cmd: &mut SdmmcCmd,
+        cmd: &mut SdmmcCmd<'_>,
         pstate: &mut State,
         mut event: Event,
         unhandled: &mut Event,
@@ -289,7 +332,7 @@ impl SdmmcCard {
                         next_state = State::Idle;
                     }
                     if mask_check_and_clear(&mut event.sdmmc_status, SDMMC_INTMASK_VOLT_SW) {
-                        self.handle_voltage_switch_stage3(cmd);
+                        self.handle_voltage_switch_stage3(cmd).await;
                         next_state = State::Idle;
                     }
                 }
@@ -316,7 +359,6 @@ impl SdmmcCard {
             }
         }
         if let Some(err) = if status & SDMMC_INTMASK_RTO != 0 {
-            info!("{TAG} process_command_responce found timeout");
             Some(Error::Timeout)
         } else if cmd.has_flag(SCF_RSP_CRC) && status & SDMMC_INTMASK_RCRC != 0 {
             Some(Error::InvalidCRC)
@@ -329,14 +371,14 @@ impl SdmmcCard {
             if cmd.data.is_some() {
                 self.sdmmc.dma_stop();
             }
-            info!("{} process_command_responce: error {:?}", TAG, err);
+            warn!("{TAG} process_command_responce: error {err:?} status={status:b}");
         }
     }
 
     fn process_data_status(&self, status: u32, cmd: &mut SdmmcCmd) {
         if status & SD_DATA_ERR_MASK != 0 {
             cmd.err = Some(if status & SDMMC_INTMASK_DTO != 0 {
-                info!("{TAG} process_data_status data timeout");
+                warn!("{TAG} process_data_status data timeout");
                 Error::Timeout
             } else if status & SDMMC_INTMASK_DCRC != 0 {
                 Error::InvalidCRC
@@ -359,17 +401,17 @@ impl SdmmcCard {
         }
     }
 
-    fn handle_voltage_switch_stage1(&mut self, slot: Slot, cmd: &mut SdmmcCmd) {
+    async fn handle_voltage_switch_stage1(&mut self, slot: Slot, cmd: &mut SdmmcCmd<'_>) {
         info!("{TAG} enabling clock");
-        self.sdmmc.set_clk_always_on(slot, true);
+        self.sdmmc.set_clk_always_on(slot, true).await;
     }
 
     async fn handle_voltage_switch_stage2(
         &mut self,
         slot: Slot,
-        cmd: &mut SdmmcCmd,
+        cmd: &mut SdmmcCmd<'_>,
     ) -> Result<(), Error> {
-        info!("{TAG}, disabling clock");
+        info!("{TAG} disabling clock");
         self.sdmmc.enable_clk_cmd11(slot, false).await?;
         block_for(Duration::from_micros(100));
 
@@ -384,9 +426,9 @@ impl SdmmcCard {
         self.sdmmc.enable_clk_cmd11(slot, true).await
     }
 
-    fn handle_voltage_switch_stage3(&mut self, cmd: &mut SdmmcCmd) {
+    async fn handle_voltage_switch_stage3(&mut self, cmd: &mut SdmmcCmd<'_>) {
         info!("{TAG} voltage switch complete, clock back to lp mode");
-        self.sdmmc.set_clk_always_on(self.slot, true);
+        self.sdmmc.set_clk_always_on(self.slot, true).await;
     }
 
     fn set_bus_width(&self) -> Result<(), Error> {

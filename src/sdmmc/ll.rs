@@ -246,7 +246,7 @@ impl Sdmmc {
             .card_detect_n()
             .bits()
             & slot.bit()
-            == 0
+            != 0
     }
 
     pub(crate) fn ll_is_card_write_protected(&self, slot: Slot) -> bool {
@@ -316,7 +316,23 @@ impl Sdmmc {
     }
 
     pub(crate) fn ll_set_card_width(&self, slot: Slot, width: Width) {
-        todo!()
+        let mask = slot.bit();
+
+        self.host.register_block().ctype().modify(|r, w| unsafe {
+            w.card_width4().bits(match width {
+                Width::Bit1 => r.card_width4().bits() & !mask,
+                Width::Bit4 => r.card_width4().bits() | mask,
+                Width::Bit8 => r.card_width4().bits(),
+            })
+        });
+
+        self.host.register_block().ctype().modify(|r, w| unsafe {
+            w.card_width8().bits(match width {
+                Width::Bit1 => r.card_width8().bits() & !mask,
+                Width::Bit4 => r.card_width8().bits() & !mask,
+                Width::Bit8 => r.card_width8().bits() | mask,
+            })
+        });
     }
 
     pub(crate) fn ll_is_card_data_busy(&self) -> bool {

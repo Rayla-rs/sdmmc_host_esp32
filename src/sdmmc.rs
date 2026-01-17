@@ -15,7 +15,7 @@ use esp_hal::{
     gpio::{Output, OutputConfig},
     peripherals::DPORT,
 };
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 
 mod ll;
 
@@ -38,10 +38,11 @@ enum ClockSource {
 }
 
 #[derive(Default)]
-struct SlotCtx {
+pub struct SlotCtx {
     slot_freq_khz: u32,
     slot_host_div: u8,
     use_gpio_matrix: bool,
+    is_uhs1: bool,
 }
 
 pub struct Sdmmc {
@@ -177,7 +178,7 @@ impl Sdmmc {
 
         // Program card clock settings, send them to the CIU
         self.ll_set_card_clk_div(slot, card_div);
-        self.set_clk_div(host_div);
+        self.set_clk_div(host_div).await;
         self.clk_update_cmd(slot, false).await.inspect_err(|err| {
             warn!("{TAG} setting clk div failed");
             warn!("{TAG} clk_update_cmd returned {err:?}")
@@ -359,38 +360,29 @@ impl Sdmmc {
         Ok(())
     }
 
+    pub fn is_slot_set_to_uhs1(&self, slot: Slot) -> Result<bool, Error> {
+        if !self.slot_initialized(slot) {
+            error!("{TAG} is_slot_set_to_uhs1: slot {slot:?} is not initialized");
+            Err(Error::InvalidState)
+        } else {
+            Ok(self.slot_ctx[slot.num() as usize].is_uhs1)
+        }
+    }
+
     pub fn set_bus_width(&self, slot: Slot, width: Width) -> Result<(), Error> {
         if slot == Slot::Slot1 && width == Width::Bit8 {
             Err(Error::InvalidArg)?;
         }
-        let mask = slot as u8;
-        match width {
-            Width::Bit1 => {
-                self.host.register_block().ctype().modify(|r, w| unsafe {
-                    w.card_width4().bits(r.card_width4().bits() & !mask);
-                    w.card_width8().bits(r.card_width8().bits() & !mask)
-                });
-            }
-            Width::Bit4 => {
-                todo!()
-            }
-            Width::Bit8 => {
-                todo!()
-            }
-        }
-        log::trace!("{} slot={:?} width={:?}", TAG, slot, width);
+
+        self.ll_set_card_width(slot, width);
 
         Ok(())
     }
-    pub fn set_clk_always_on(&mut self, slot: Slot, en: bool) {
-        // mut because of safety
-        self.host.register_block().clkena().modify(|r, w| unsafe {
-            w.lp_enable().bits(if en {
-                r.lp_enable().bits() | slot as u8
-            } else {
-                r.lp_enable().bits() & !(slot as u8)
-            })
-        });
+
+    // look here
+    pub async fn set_clk_always_on(&mut self, slot: Slot, en: bool) {
+        self.ll_enable_card_clk_low_power(slot, en);
+        let _ = self.clk_update_cmd(slot, false).await; // WARN err ignored
     }
 
     pub async fn wait_for_event(&self) -> Event {

@@ -1,5 +1,5 @@
 use embassy_time::Timer;
-use log::{info, warn};
+use log::{debug, error, info, warn};
 use sdio_host::sd::CSD;
 
 use crate::{cmd::SdmmcCmd, common::*, sdmmc_sd::SdmmcCard, Error, Width};
@@ -7,9 +7,9 @@ use crate::{cmd::SdmmcCmd, common::*, sdmmc_sd::SdmmcCard, Error, Width};
 const TAG: &'static str = "[SDMMC_CMD]";
 
 impl SdmmcCard {
-    pub async fn send_cmd(&mut self, cmd: &mut SdmmcCmd) -> Result<(), Error> {
+    pub async fn send_cmd(&mut self, cmd: &mut SdmmcCmd<'_>) -> Result<(), Error> {
         cmd.timeout_ms = 1000;
-        info!("{TAG} sending cmd {:?}", cmd);
+        debug!("{TAG} sending cmd {:?}", cmd);
         self.do_transaction(cmd).await?;
         let block = self.sdmmc.host.register_block();
         let state = (block.resp0().read().bits() >> 9) & 0xf;
@@ -25,7 +25,7 @@ impl SdmmcCard {
         Ok(())
     }
 
-    pub async fn send_app_cmd(&mut self, cmd: &mut SdmmcCmd) -> Result<(), Error> {
+    pub async fn send_app_cmd(&mut self, cmd: &mut SdmmcCmd<'_>) -> Result<(), Error> {
         let mut app_cmd = SdmmcCmd {
             opcode: MMC_APP_CMD,
             arg: self.rsa << 16,
@@ -56,8 +56,8 @@ impl SdmmcCard {
     }
 
     pub async fn cmd_send_if_cond(&mut self, ocr: u32) -> Result<(), Error> {
-        // const PATTERN: u32 = 0xAA;
-        const PATTERN: u32 = 0;
+        const PATTERN: u32 = 0xAA;
+        // const PATTERN: u32 = 0;
 
         const SD_OCR_VOL_MASK: u32 = 0xFF8000;
 
@@ -86,7 +86,7 @@ impl SdmmcCard {
 
     pub async fn cmd_send_op_cond(&mut self, ocr: u32) -> Result<(), Error> {
         // Setup
-        self.sdmmc.set_clk_always_on(self.slot, true);
+        self.sdmmc.set_clk_always_on(self.slot, true).await;
 
         let res = 'main: {
             let mut cmd;
@@ -130,7 +130,7 @@ impl SdmmcCard {
         };
 
         // Cleanup
-        self.sdmmc.set_clk_always_on(self.slot, false);
+        self.sdmmc.set_clk_always_on(self.slot, false).await;
         res
     }
 
@@ -210,7 +210,13 @@ impl SdmmcCard {
     }
 
     pub async fn cmd_select_card(&mut self, rca: u32) -> Result<(), Error> {
-        todo!()
+        self.send_cmd(&mut SdmmcCmd {
+            opcode: MMC_SELECT_CARD,
+            arg: rca << 16,
+            flags: SCF_CMD_AC | if rca == 0 { 0 } else { SCF_RSP_R1 },
+            ..Default::default()
+        })
+        .await
     }
 
     pub async fn cmd_send_scr(&mut self) -> Result<(), Error> {
@@ -227,7 +233,15 @@ impl SdmmcCard {
     }
 
     pub async fn cmd_send_status(&mut self) -> Result<u32, Error> {
-        todo!()
+        let cmd = &mut SdmmcCmd {
+            opcode: MMC_SEND_STATUS,
+            arg: (self.rca as u32) << 16,
+            flags: SCF_CMD_AC | SCF_RSP_R1,
+            ..Default::default()
+        };
+
+        self.send_cmd(cmd).await?;
+        Ok(cmd.responce[0])
     }
 
     pub async fn cmd_num_of_written_blocks(&mut self) -> Result<usize, Error> {
@@ -244,12 +258,61 @@ impl SdmmcCard {
         todo!()
     }
 
-    pub async fn read_sectors(&mut self) -> Result<(), Error> {
+    pub async fn read_sectors(
+        &mut self,
+        blocks: &mut [embedded_sdmmc::Block],
+        start_block_idx: embedded_sdmmc::BlockIdx,
+    ) -> Result<(), Error> {
+        // create dma capable buffer
+
         todo!()
     }
 
-    pub async fn read_sectors_dma(&mut self) -> Result<(), Error> {
-        todo!()
+    pub async fn read_sectors_dma(
+        &mut self,
+        dst: &mut [u8],
+        start_block: u32,
+        block_count: u32,
+        buffer_len: u32,
+    ) -> Result<(), Error> {
+        // if start_block + block_count > self.csd.capacity {
+        //     Err(Error::InvalidSize)?;
+        // }
+        let block_size = 512; //self.csd.sector_size;
+        let mut cmd = SdmmcCmd {
+            opcode: if block_count == 1 {
+                MMC_READ_BLOCK_SINGLE
+            } else {
+                MMC_READ_BLOCK_MULTIPLE
+            },
+            flags: SCF_CMD_ADTC | SCF_CMD_READ | SCF_RSP_R1,
+            blklen: block_size,
+            data: Some(dst),
+            datalen: block_count * block_size,
+            buflen: buffer_len,
+            arg: if self.ocr & SD_OCR_SDHC_CAP != 0 {
+                start_block
+            } else {
+                start_block * block_size
+            },
+            ..Default::default()
+        };
+
+        let err = self.send_cmd(&mut cmd).await;
+        let err_cmd13 = self.cmd_send_status().await;
+
+        if err.is_err() {
+            match err_cmd13 {
+                Ok(status) => {
+                    error!("{TAG} read_sectors_dma: send_cmd returned {err:?}, status {status}")
+                }
+                Err(err) => {
+                    error!("{TAG} read_sectors_dma: send_cmd returned {err:?}, failed to get status ({err_cmd13:?})")
+                }
+            }
+        }
+
+        err
     }
 
     pub async fn erase_sectors(&mut self) -> Result<(), Error> {

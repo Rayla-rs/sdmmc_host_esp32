@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::{error, info, warn};
 
 use crate::{common::*, sdmmc_sd::SdmmcCard, Error};
 
@@ -14,8 +14,11 @@ impl SdmmcCard {
             acdm41_arg |= SD_OCR_SDHC_CAP;
         }
 
-        let to_set_to_uhs1 = true; // FORCE uhs1
-                                   // TODO uhs1
+        let to_set_to_uhs1 = self
+            .sdmmc
+            .is_slot_set_to_uhs1(self.slot)
+            .inspect_err(|_| error!("{TAG} failed to get slot info"))?;
+
         if to_set_to_uhs1 {
             acdm41_arg |= SD_OCR_S18_RA;
             acdm41_arg |= SD_OCR_XPC;

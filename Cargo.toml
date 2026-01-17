@@ -30,6 +30,7 @@ esp32 = "0.37.0"
 embassy-futures = "0.1.2"
 sdio-host = "0.9.0"
 embassy-sync = "0.7.2"
+embedded-sdmmc = "0.9.0"
 
 [profile.dev]
 # Rust debug is too slow.

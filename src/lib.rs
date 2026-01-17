@@ -6,23 +6,12 @@ mod hw_cmd;
 mod sdmmc;
 pub mod sdmmc_sd;
 
-use core::any::Any;
-
-use embassy_executor::task;
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    channel::Channel,
-    semaphore::{FairSemaphore, Semaphore},
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, semaphore::FairSemaphore,
 };
-use embassy_time::Timer;
-use esp_hal::{gpio::Output, peripherals::IO_MUX};
-use esp_hal::{
-    gpio::{Flex, OutputConfig, Pull},
-    peripherals::GPIO,
-};
-use log::trace;
+use esp_hal::peripherals::IO_MUX;
 
-use crate::{gpio::configure_pin_gpio_matrix, inter::Event};
+use crate::inter::Event;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -34,6 +23,7 @@ pub enum Error {
     InvalidSize,
     Fail,
     NotSupported,
+    InvalidState,
 }
 
 //configure pins

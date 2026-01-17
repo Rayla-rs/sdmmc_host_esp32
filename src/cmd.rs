@@ -1,12 +1,12 @@
 use crate::common::*;
 use crate::{hw_cmd::SdmmcHwCmd, Error};
 
-#[derive(Debug, Clone, Copy)]
-pub struct SdmmcCmd {
+#[derive(Debug)]
+pub struct SdmmcCmd<'a> {
     pub opcode: u8,
     pub arg: u32,
     pub responce: [u32; 4],
-    pub data: Option<*mut u8>,
+    pub data: Option<&'a mut [u8]>,
     pub datalen: u32,
     pub buflen: u32,
     pub blklen: u32,
@@ -16,7 +16,7 @@ pub struct SdmmcCmd {
     pub volt_switch_cb_arg: Option<fn(*mut u8, u32) -> Result<(), Error>>,
 }
 
-impl Default for SdmmcCmd {
+impl<'a> Default for SdmmcCmd<'a> {
     fn default() -> Self {
         Self {
             opcode: 0,
@@ -34,7 +34,7 @@ impl Default for SdmmcCmd {
     }
 }
 
-impl SdmmcCmd {
+impl<'a> SdmmcCmd<'a> {
     pub const fn scf_cmd(&self) -> u32 {
         self.flags & 0x00f0
     }
