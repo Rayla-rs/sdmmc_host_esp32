@@ -8,7 +8,7 @@ impl SdmmcCard {
     pub async fn init_ocr(&mut self) -> Result<(), Error> {
         let mut host_ocr = SD_OCR_VOL_MASK;
 
-        let mut acdm41_arg = host_ocr;
+        let mut acdm41_arg = if self.host_is_spi() { 0 } else { host_ocr };
 
         if self.ocr & SD_OCR_SDHC_CAP != 0 {
             acdm41_arg |= SD_OCR_SDHC_CAP;
@@ -27,17 +27,19 @@ impl SdmmcCard {
 
         let res = self.cmd_send_op_cond(acdm41_arg).await;
 
-        if res.is_err_and(|err| err == Error::Timeout) {
+        if res.is_err_and(|err| err == Error::Timeout && !self.host_is_spi()) {
             info!("{TAG} send_op_cond timeout, trying MMC");
             self.is_mmc = true;
             self.cmd_send_op_cond(acdm41_arg)
                 .await
-                .inspect_err(|err| warn!("{TAG} send_op_comd returned {err:?}"))?;
+                .inspect_err(|err| error!("{TAG} send_op_cond returned {err:?}"))?;
         }
 
-        self.cmd_read_ocr()
-            .await
-            .inspect_err(|err| warn!("{TAG} read_ocr returned {err:?}"))?;
+        if self.host_is_spi() {
+            self.cmd_read_ocr()
+                .await
+                .inspect_err(|err| error!("{TAG} read_ocr returned {err:?}"))?;
+        }
 
         info!("{TAG} host_ocr={host_ocr} card_ocr={}", self.ocr);
 
@@ -63,9 +65,12 @@ impl SdmmcCard {
     }
 
     pub async fn init_rca(&mut self) -> Result<(), Error> {
-        self.cmd_set_relative_addr()
-            .await
-            .inspect_err(|err| warn!("{TAG} init_rca: set_relative_addr returned {err:?}"))
+        self.cmd_set_relative_addr().await.inspect_err(|err| {
+            error!(
+                "{TAG} init_rca: set_relative_addr returned {err:?} is_mmc={:?} is_mem={:?}",
+                self.is_mmc, self.is_mem
+            )
+        })
     }
 
     pub fn init_mmc_decode_cid(&mut self) -> Result<(), Error> {

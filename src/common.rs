@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_macros)]
 
 use crate::bit;
 
@@ -122,6 +124,16 @@ pub const MMC_R1_CURRENT_STATE_POS: u32 = 9;
 pub const MMC_R1_CURRENT_STATE_MASK: u32 = 0x1E00; /* card current state */
 pub const MMC_R1_CURRENT_STATE_TRAN: u32 = 4;
 
+// SPI mode R1 response type bits
+pub const SD_SPI_R1_IDLE_STATE: u32 = 1 << 0;
+pub const SD_SPI_R1_ERASE_RST: u32 = 1 << 1;
+pub const SD_SPI_R1_ILLEGAL_CMD: u32 = 1 << 2;
+pub const SD_SPI_R1_CMD_CRC_ERR: u32 = 1 << 3;
+pub const SD_SPI_R1_ERASE_SEQ_ERR: u32 = 1 << 4;
+pub const SD_SPI_R1_ADDR_ERR: u32 = 1 << 5;
+pub const SD_SPI_R1_PARAM_ERR: u32 = 1 << 6;
+pub const SD_SPI_R1_NO_RESPONSE: u32 = 1 << 7;
+
 pub const MMC_OCR_MEM_READY: u32 = 1 << 31; /* memory power-up status bit */
 pub const MMC_OCR_ACCESS_MODE_MASK: u32 = 0x60000000; /* bits 30:29 */
 pub const MMC_OCR_SECTOR_MODE: u32 = 1 << 30;
@@ -148,3 +160,169 @@ pub const SD_OCR_VOL_MASK: u32 = 0xFF8000;
 pub const SD_OCR_SDHC_CAP: u32 = 1 << 30;
 pub const SD_OCR_XPC: u32 = 1 << 28;
 pub const SD_OCR_S18_RA: u32 = 1 << 24;
+
+/* CMD52 arguments */
+pub const SD_ARG_CMD52_READ: u32 = 0 << 31;
+pub const SD_ARG_CMD52_WRITE: u32 = 1 << 31;
+pub const SD_ARG_CMD52_FUNC_SHIFT: u32 = 28;
+pub const SD_ARG_CMD52_FUNC_MASK: u32 = 0x7;
+pub const SD_ARG_CMD52_EXCHANGE: u32 = 1 << 27;
+pub const SD_ARG_CMD52_REG_SHIFT: u32 = 9;
+pub const SD_ARG_CMD52_REG_MASK: u32 = 0x1ffff;
+pub const SD_ARG_CMD52_DATA_SHIFT: u32 = 0;
+pub const SD_ARG_CMD52_DATA_MASK: u32 = 0xff;
+
+/* CMD53 arguments */
+pub const SD_ARG_CMD53_READ: u32 = 0 << 31;
+pub const SD_ARG_CMD53_WRITE: u32 = 1 << 31;
+pub const SD_ARG_CMD53_FUNC_SHIFT: u32 = 28;
+pub const SD_ARG_CMD53_FUNC_MASK: u32 = 0x7;
+pub const SD_ARG_CMD53_BLOCK_MODE: u32 = 1 << 27;
+pub const SD_ARG_CMD53_INCREMENT: u32 = 1 << 26;
+pub const SD_ARG_CMD53_REG_SHIFT: u32 = 9;
+pub const SD_ARG_CMD53_REG_MASK: u32 = 0x1ffff;
+pub const SD_ARG_CMD53_LENGTH_SHIFT: u32 = 0;
+pub const SD_ARG_CMD53_LENGTH_MASK: u32 = 0x1ff;
+pub const SD_ARG_CMD53_LENGTH_MAX: u32 = 512;
+
+/* Card Common Control Registers (CCCR) */
+pub const SD_IO_CCCR_START: u32 = 0x00000;
+pub const SD_IO_CCCR_SIZE: u32 = 0x100;
+pub const SD_IO_CCCR_FN_ENABLE: u32 = 0x02;
+pub const SD_IO_CCCR_FN_READY: u32 = 0x03;
+pub const SD_IO_CCCR_INT_ENABLE: u32 = 0x04;
+pub const SD_IO_CCCR_INT_PENDING: u32 = 0x05;
+pub const SD_IO_CCCR_CTL: u32 = 0x06;
+pub const CCCR_CTL_RES: u32 = 1 << 3;
+pub const SD_IO_CCCR_BUS_WIDTH: u32 = 0x07;
+pub const CCCR_BUS_WIDTH_1: u32 = 0 << 0;
+pub const CCCR_BUS_WIDTH_4: u32 = 2 << 0;
+pub const CCCR_BUS_WIDTH_8: u32 = 3 << 0;
+pub const CCCR_BUS_WIDTH_ECSI: u32 = 1 << 5;
+pub const SD_IO_CCCR_CARD_CAP: u32 = 0x08;
+// pub const   CCCR_CARD_CAP_LSC     :u32 =     BIT(6)
+// pub const   CCCR_CARD_CAP_4BLS    :u32 =     BIT(7)
+pub const SD_IO_CCCR_CISPTR: u32 = 0x09;
+pub const SD_IO_CCCR_BLKSIZEL: u32 = 0x10;
+pub const SD_IO_CCCR_BLKSIZEH: u32 = 0x11;
+pub const SD_IO_CCCR_HIGHSPEED: u32 = 0x13;
+// pub const   CCCR_HIGHSPEED_SUPPORT:u32 =     BIT(0)
+// pub const   CCCR_HIGHSPEED_ENABLE :u32 =     BIT(1)
+
+/* SD R4 response (IO OCR) */
+pub const SD_IO_OCR_MEM_READY: u32 = 1 << 31;
+pub const fn sd_io_ocr_num_functions(ocr: u32) -> u32 {
+    ((ocr) >> 28) & 0x7
+}
+pub const SD_IO_OCR_MEM_PRESENT: u32 = 1 << 27;
+pub const SD_IO_OCR_MASK: u32 = 0x00fffff0;
+
+macro_rules! MMC_R1_CURRENT_STATE_STATUS {
+    ($status: expr) => {
+        (status & MMC_R1_CURRENT_STATE_MASK) >> MMC_R1_CURRENT_STATE_POS
+    };
+}
+
+macro_rules! MMC_R1 {
+    ($resp: expr) => {
+        $resp[0]
+    };
+}
+
+macro_rules! MMC_R2 {
+    ($resp: expr) => {
+        $resp[0]
+    };
+}
+
+macro_rules! MMC_R3 {
+    ($resp: expr) => {
+        $resp[0]
+    };
+}
+
+macro_rules! MMC_R4 {
+    ($resp: expr) => {
+        $resp[0]
+    };
+}
+
+macro_rules! MMC_R5 {
+    ($resp: expr) => {
+        $resp[0]
+    };
+}
+
+macro_rules! SD_R6 {
+    ($resp: expr) => {
+        $resp[0]
+    };
+}
+
+macro_rules! MMC_R1_CURRENT_STATE {
+    ($resp: expr) => {
+        ($resp[0] >> 9) & 0xf
+    };
+}
+
+macro_rules! MMC_ARG_RCA {
+    ($expr: expr) => {
+        ($expr as u32) << 16
+    };
+}
+
+macro_rules! SD_R6_RCA {
+    ($resp: expr) => {
+        (SD_R6!($resp) >> 16) as u16
+    };
+}
+
+macro_rules! SD_SPI_R1 {
+    ($resp: expr) => {
+        $resp[0] & 0xff
+    };
+}
+
+macro_rules! SD_SPI_R2 {
+    ($resp: expr) => {
+        $resp[0] & 0xffff
+    };
+}
+
+macro_rules! SD_SPI_R3 {
+    ($resp: expr) => {
+        $resp[0]
+    };
+}
+
+#[inline]
+pub const fn mmc_rsp_bits(src: &mut [u32], start: usize, len: usize) -> u32 {
+    let mask = if len % 32 == 0 {
+        u32::MAX
+    } else {
+        u32::MAX >> (32 - (len % 32))
+    };
+    let word = start / 32;
+    let shift = start % 32;
+    let right = src[word] >> shift;
+    let left = if len + shift <= 32 {
+        0
+    } else {
+        src[word + 1] << ((32 - shift) % 32)
+    };
+    return (left | right) & mask;
+}
+
+pub(crate) use MMC_ARG_RCA;
+pub(crate) use MMC_R1;
+pub(crate) use MMC_R1_CURRENT_STATE;
+pub(crate) use MMC_R1_CURRENT_STATE_STATUS;
+pub(crate) use MMC_R2;
+pub(crate) use MMC_R3;
+pub(crate) use MMC_R4;
+pub(crate) use MMC_R5;
+pub(crate) use SD_R6;
+pub(crate) use SD_R6_RCA;
+pub(crate) use SD_SPI_R1;
+pub(crate) use SD_SPI_R2;
+pub(crate) use SD_SPI_R3;

@@ -11,7 +11,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
 use esp_hal::gpio::{Input, InputConfig, Output, OutputConfig};
 use esp_hal::timer::timg::TimerGroup;
-use log::{info, warn};
+use log::{error, info, warn};
 use sdmmc_host_esp32::{configure_pins2, pullup_en_internal, Slot, Width};
 
 #[panic_handler]
@@ -49,7 +49,7 @@ async fn main(spawner: Spawner) {
     Output::new(
         peripherals.GPIO13,
         esp_hal::gpio::Level::Low,
-        OutputConfig::default().with_pull(esp_hal::gpio::Pull::None),
+        OutputConfig::default().with_pull(esp_hal::gpio::Pull::Down),
     );
     pullup_en_internal(Slot::Slot1, Width::Bit1).unwrap();
     configure_pins2(true);
@@ -57,18 +57,23 @@ async fn main(spawner: Spawner) {
     // spawner.must_spawn(sdmmc_host_esp32::intr_poller());
 
     // let mut d1 = Input::new(peripherals.GPIO2, InputConfig::default());
-    let (rx_buf, rx_descs, tx_buf, tx_descs) = esp_hal::dma_buffers!(32000);
-    let mut driver = sdmmc_host_esp32::sdmmc_sd::SdmmcCard::new(
-        peripherals.SDHOST,
-        DmaRxBuf::new(rx_descs, rx_buf).unwrap(),
-        DmaTxBuf::new(tx_descs, tx_buf).unwrap(),
-    )
-    .await;
 
     // try init
-    while let Err(err) = driver.init().await {
-        warn!("{TAG} driver init failed with err={err:?}, retry...");
-        Timer::after(Duration::from_secs(1)).await
+    loop {
+        let (rx_buf, rx_descs, tx_buf, tx_descs) = esp_hal::dma_buffers!(32000);
+
+        let mut driver = sdmmc_host_esp32::sdmmc_sd::SdmmcCard::new(
+            unsafe { peripherals.SDHOST.clone_unchecked() },
+            DmaRxBuf::new(rx_descs, rx_buf).unwrap(),
+            DmaTxBuf::new(tx_descs, tx_buf).unwrap(),
+        )
+        .await;
+        if let Err(err) = driver.init().await {
+            error!("{TAG} driver init failed with err={err:?}, retry...\n\n");
+            Timer::after(Duration::from_secs(1)).await
+        } else {
+            break;
+        }
     }
     info!("{TAG} Driver initialized!");
 }

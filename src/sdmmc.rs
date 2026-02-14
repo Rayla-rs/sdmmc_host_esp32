@@ -59,6 +59,11 @@ impl Sdmmc {
             active_slot: None,
         }
     }
+
+    pub(crate) fn io_int_enable(&self, slot: Slot) -> Result<(), Error> {
+        debug!("io_int_enable not implimented yet");
+        Ok(())
+    }
 }
 
 impl Sdmmc {
@@ -220,12 +225,12 @@ impl Sdmmc {
             }
         }
 
-        if self.ll_is_card_detected(slot) && !cmd.update_clk_reg() {
+        if !self.ll_is_card_detected(slot) && !cmd.update_clk_reg() {
             Err(Error::NotFound)?;
         }
 
         if cmd.data_expected() && cmd.rw() && self.ll_is_card_write_protected(slot) {
-            Err(Error::NotFound)?;
+            Err(Error::InvalidState)?;
         }
 
         cmd = cmd.with_use_hold_reg(true);
@@ -336,7 +341,7 @@ impl Sdmmc {
         pullup_en_internal(slot, width)?;
         configure_pin_iomux!(gpio15, gpio14, gpio2);
 
-        let pwr = Output::new(
+        let _pwr = Output::new(
             unsafe { esp_hal::peripherals::GPIO13::steal() },
             esp_hal::gpio::Level::High,
             OutputConfig::default().with_pull(esp_hal::gpio::Pull::None),
@@ -389,23 +394,7 @@ impl Sdmmc {
         EVENT_QUEUE.receive().await
     }
 
-    // DMA
-
-    pub fn dma_init(&self) {
-        let block = self.host.register_block();
-
-        block
-            .ctrl()
-            .modify(|r, w| unsafe { w.bits(r.bits() | 1 << 5) }); // enable dma
-        block.bmod().write(|w| unsafe { w.bits(0) });
-        block.bmod().write(|w| w.swr().set_bit());
-        block.idinten().write(|w| {
-            w.ni().set_bit();
-            w.ri().set_bit();
-            w.ti().set_bit()
-        });
-    }
-
+    // TODO move to ll
     pub fn dma_stop(&self) {
         let block = self.host.register_block();
 
@@ -420,7 +409,7 @@ impl Sdmmc {
         });
     }
 
-    pub fn dma_prepare(&self, desc: *mut DmaDescriptor, block_size: u16, data_size: u32) {
+    pub fn dma_prepare(&self, desc: *mut DmaDescriptor, block_size: u32, data_size: u32) {
         let block = self.host.register_block();
 
         block
@@ -428,7 +417,7 @@ impl Sdmmc {
             .write(|w| unsafe { w.byte_count().bits(data_size) });
         block
             .blksiz()
-            .write(|w| unsafe { w.block_size().bits(block_size) });
+            .write(|w| unsafe { w.block_size().bits(block_size.try_into().unwrap()) });
         block
             .dbaddr()
             .write(|w| unsafe { w.dbaddr().bits(desc.addr() as u32) });
@@ -474,24 +463,8 @@ impl Sdmmc {
         });
     }
 
-    pub fn enable_1v8_mode(&self, slot: Slot, en: bool) {
+    pub fn enable_1v8_mode(&self, _slot: Slot, _en: bool) {
         // for compatibility
-    }
-
-    pub fn set_card_width(&self, slot: Slot, width: Width) {
-        self.host.register_block().ctype().modify(|r, w| unsafe {
-            match width {
-                Width::Bit1 => {
-                    w.card_width8().bits(r.card_width8().bits() & !(slot as u8));
-                    w.card_width4().bits(r.card_width4().bits() & !(slot as u8))
-                }
-                Width::Bit4 => {
-                    w.card_width8().bits(r.card_width8().bits() & !(slot as u8));
-                    w.card_width4().bits(r.card_width4().bits() | (slot as u8))
-                }
-                Width::Bit8 => w.card_width8().bits(r.card_width8().bits() | (slot as u8)),
-            }
-        });
     }
 
     pub fn enable_dma(&self, en: bool) {

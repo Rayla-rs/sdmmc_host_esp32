@@ -8,32 +8,41 @@ const TAG: &'static str = "[SDMMC_CMD]";
 
 impl SdmmcCard {
     pub async fn send_cmd(&mut self, cmd: &mut SdmmcCmd<'_>) -> Result<(), Error> {
-        cmd.timeout_ms = 1000;
+        if cmd.timeout_ms != 0 {
+            cmd.timeout_ms = 1000;
+        }
+
         debug!("{TAG} sending cmd {:?}", cmd);
-        self.do_transaction(cmd).await?;
-        let block = self.sdmmc.host.register_block();
-        let state = (block.resp0().read().bits() >> 9) & 0xf;
+        self.do_transaction(cmd).await.inspect_err(|err| {
+            warn!("{TAG} cmd={}, sdmmc_req_run returned {:?}", cmd.opcode, err)
+        })?;
+
+        let state = MMC_R1_CURRENT_STATE!(cmd.responce);
         log::info!(
             "{TAG}, cmd responce {} {} {} {} err {:?} state {}",
-            block.resp0().read().bits(),
-            block.resp1().read().bits(),
-            block.resp2().read().bits(),
-            block.resp3().read().bits(),
+            cmd.responce[0],
+            cmd.responce[1],
+            cmd.responce[2],
+            cmd.responce[3],
             cmd.err,
             state
         );
-        Ok(())
+
+        match cmd.err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     pub async fn send_app_cmd(&mut self, cmd: &mut SdmmcCmd<'_>) -> Result<(), Error> {
         let mut app_cmd = SdmmcCmd {
             opcode: MMC_APP_CMD,
-            arg: self.rsa << 16,
+            arg: 0x00100000, // MMC_ARG_RCA!(self.rca),
             flags: SCF_CMD_AC | SCF_RSP_R1,
             ..Default::default()
         };
         self.send_cmd(&mut app_cmd).await?;
-        if app_cmd.responce[0] & MMC_R1_APP_CMD == 0 {
+        if !self.host_is_spi() && MMC_R1!(app_cmd.responce) & MMC_R1_APP_CMD == 0 {
             warn!("{TAG} card does not support APP_CMD");
             Err(Error::NotSupported)?;
         }
@@ -57,17 +66,12 @@ impl SdmmcCard {
 
     pub async fn cmd_send_if_cond(&mut self, ocr: u32) -> Result<(), Error> {
         const PATTERN: u32 = 0xAA;
-        // const PATTERN: u32 = 0;
-
-        const SD_OCR_VOL_MASK: u32 = 0xFF8000;
-
-        let arg = u32::from(0b1u32 & 0xF) << 8 | u32::from(PATTERN);
 
         let mut cmd = SdmmcCmd {
             opcode: SD_SEND_IF_COND,
-            // arg: ((((ocr & SD_OCR_VOL_MASK) != 0) as u32) << 8) | PATTERN,
+            arg: ((((ocr & SD_OCR_VOL_MASK) != 0) as u32) << 8) | PATTERN,
             // arg: 0x0000001AA,
-            arg,
+            // arg,
             flags: SCF_CMD_BCR | SCF_RSP_R7,
             ..Default::default()
         };
@@ -98,7 +102,7 @@ impl SdmmcCard {
                 cmd = SdmmcCmd::default();
                 cmd.arg = ocr;
                 cmd.flags = SCF_CMD_BCR | SCF_RSP_R3;
-                match if self.is_mmc {
+                match if !self.is_mmc {
                     cmd.opcode = SD_APP_OP_COND;
                     self.send_app_cmd(&mut cmd).await
                 } else {
@@ -108,16 +112,24 @@ impl SdmmcCard {
                     self.send_cmd(&mut cmd).await
                 } {
                     Ok(_) => {
-                        if cmd.responce[0] & MMC_OCR_MEM_READY != 0 || ocr == 0 {
-                            self.ocr = cmd.responce[0];
-                            break 'main Ok(());
+                        if !self.host_is_spi() {
+                            if MMC_R3!(cmd.responce) & MMC_OCR_MEM_READY != 0 || ocr == 0 {
+                                self.ocr = MMC_R3!(cmd.responce);
+                                break 'main Ok(());
+                            }
+                        } else {
+                            if SD_SPI_R1!(cmd.responce) & SD_SPI_R1_IDLE_STATE == 0 {
+                                self.ocr = MMC_R3!(cmd.responce);
+                                break 'main Ok(());
+                            }
                         }
+                        warn!("{TAG} ok but not ready cmd_r3={:b}", cmd.responce[0]);
                         Timer::after_millis(10).await
                     }
                     Err(err) => {
                         err_cnt -= 1;
                         if err_cnt == 0 {
-                            warn!("{TAG} sdmmc_send_app_cmd err {:?}", err);
+                            error!("{TAG} sdmmc_send_app_cmd err {:?}", err);
                             break 'main Err(err);
                         } else {
                             info!("{TAG} ignoring err {:?}", err);
@@ -141,7 +153,7 @@ impl SdmmcCard {
             ..Default::default()
         };
         self.send_cmd(&mut cmd).await?;
-        self.ocr = cmd.responce[0];
+        self.ocr = SD_SPI_R3!(cmd.responce);
         Ok(())
     }
 
@@ -165,20 +177,22 @@ impl SdmmcCard {
 
         let mmc_rca = 1;
         if self.is_mmc {
-            cmd.arg = mmc_rca << 16;
+            cmd.arg = MMC_ARG_RCA!(mmc_rca);
         }
 
         self.send_cmd(&mut cmd).await?;
 
         if self.is_mmc {
-            self.rca = mmc_rca as u16;
+            self.rca = mmc_rca;
         } else {
-            let mut response_rca = cmd.responce[0] >> 16;
+            let mut response_rca = SD_R6_RCA!(cmd.responce);
             if response_rca == 0 {
+                // Try to get another RCA value if RCA value in the previous response was 0x0000
+                // The value 0x0000 is reserved to set all cards into the Stand-by State with CMD7
                 self.send_cmd(&mut cmd).await?;
-                response_rca = cmd.responce[0] >> 16;
+                response_rca = SD_R6_RCA!(cmd.responce);
             }
-            self.rca = response_rca as u16;
+            self.rca = response_rca;
         }
         Ok(())
     }
@@ -186,7 +200,7 @@ impl SdmmcCard {
     pub async fn cmd_set_blocklen<Ext>(&mut self, csd: &CSD<Ext>) -> Result<(), Error> {
         self.send_cmd(&mut SdmmcCmd {
             opcode: MMC_SET_BLOCKLEN,
-            arg: todo!(),
+            arg: self.csd.sector_size,
             flags: SCF_CMD_AC | SCF_RSP_R1,
             ..Default::default()
         })
@@ -196,7 +210,7 @@ impl SdmmcCard {
     pub async fn cmd_send_csd(&mut self) -> Result<(), Error> {
         let cmd = &mut SdmmcCmd {
             opcode: MMC_SEND_CSD,
-            arg: (self.rca as u32) << 16,
+            arg: MMC_ARG_RCA!(self.rca),
             flags: SCF_CMD_AC | SCF_RSP_R2,
             ..Default::default()
         };
@@ -210,10 +224,11 @@ impl SdmmcCard {
     }
 
     pub async fn cmd_select_card(&mut self, rca: u32) -> Result<(), Error> {
+        let responce = if rca == 0 { 0 } else { SCF_RSP_R1 };
         self.send_cmd(&mut SdmmcCmd {
             opcode: MMC_SELECT_CARD,
-            arg: rca << 16,
-            flags: SCF_CMD_AC | if rca == 0 { 0 } else { SCF_RSP_R1 },
+            arg: MMC_ARG_RCA!(rca),
+            flags: SCF_CMD_AC | responce,
             ..Default::default()
         })
         .await
@@ -235,13 +250,18 @@ impl SdmmcCard {
     pub async fn cmd_send_status(&mut self) -> Result<u32, Error> {
         let cmd = &mut SdmmcCmd {
             opcode: MMC_SEND_STATUS,
-            arg: (self.rca as u32) << 16,
+            arg: MMC_ARG_RCA!(self.rca),
             flags: SCF_CMD_AC | SCF_RSP_R1,
             ..Default::default()
         };
 
         self.send_cmd(cmd).await?;
-        Ok(cmd.responce[0])
+
+        Ok(if self.host_is_spi() {
+            SD_SPI_R2!(cmd.responce)
+        } else {
+            MMC_R1!(cmd.responce)
+        })
     }
 
     pub async fn cmd_num_of_written_blocks(&mut self) -> Result<usize, Error> {

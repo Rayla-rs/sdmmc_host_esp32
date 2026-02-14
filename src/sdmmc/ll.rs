@@ -246,7 +246,7 @@ impl Sdmmc {
             .card_detect_n()
             .bits()
             & slot.bit()
-            != 0
+            == 0
     }
 
     pub(crate) fn ll_is_card_write_protected(&self, slot: Slot) -> bool {

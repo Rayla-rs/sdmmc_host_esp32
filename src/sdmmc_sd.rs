@@ -3,11 +3,11 @@ use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_time::{block_for, Duration, WithTimeout};
 use embedded_sdmmc::BlockDevice;
 use esp_hal::{
-    dma::{DmaDescriptor, DmaRxBuf, DmaRxBuffer, DmaTxBuf},
+    dma::{DmaRxBuf, DmaRxBuffer, DmaTxBuf},
     peripherals::SDHOST,
 };
 use log::{debug, info, warn};
-use sdio_host::{common_cmd::Resp, sd::SD, Cmd};
+use sdio_host::sd::SD;
 
 pub mod cmd;
 pub mod common;
@@ -15,8 +15,7 @@ pub mod init;
 pub mod io;
 
 use crate::{
-    bit, cmd::SdmmcCmd, common::*, common::*, inter::Event, sdmmc::Sdmmc, Error, Slot, Width,
-    EVENT_QUEUE,
+    cmd::SdmmcCmd, common::*, inter::Event, sdmmc::Sdmmc, Error, Slot, Width, EVENT_QUEUE,
 };
 const TAG: &'static str = "[SDMMC_CARD]";
 
@@ -45,7 +44,10 @@ pub struct SdmmcCard {
     ocr: u32,
     pub(crate) raw_cid: [u32; 4],
     pub(crate) rca: u16,
-    pub(crate) csd: CSD, // look at later
+    pub(crate) csd: CSD,
+    pub(crate) is_sdio: bool,
+    pub(crate) is_mem: bool,
+    pub(crate) num_io_functions: u32, // look at later
 }
 
 pub struct SdmmcDevice(Mutex<CriticalSectionRawMutex, SdmmcCard>);
@@ -93,21 +95,29 @@ impl SdmmcCard {
             slot: Slot::Slot1,
             width: Width::Bit1,
             bus_sampling_mode: BusSamplingMode::SDR,
-            freq_khz: 20000,
+            freq_khz: 400, // 20000
             dma_rx_buf,
             dma_tx_buf,
             rsa: 0,
             ocr: 0,
             raw_cid: [0u32; 4],
-            rca: 0,
+            rca: 0x0001,
             csd: CSD {
                 sector_size: 0,
                 capacity: 0,
             },
             is_mmc: false,
+            is_sdio: false,
+            is_mem: false,
+            num_io_functions: 0,
         };
         card.sdmmc.init().await.unwrap();
         card
+    }
+
+    pub fn host_is_spi(&self) -> bool {
+        // TODO add more
+        false
     }
 
     pub async fn init_sd_if_cond(&mut self) -> Result<(), Error> {
@@ -477,13 +487,7 @@ impl SdmmcCard {
 
     fn dma_prepare(&mut self, data_size: u32, block_size: u32) {
         let prep = self.dma_rx_buf.prepare();
-
-        let block = self.sdmmc.host.register_block();
-        block.bytcnt().write(|w| unsafe { w.bits(data_size) });
-        block.blksiz().write(|w| unsafe { w.bits(block_size) });
-        block
-            .dbaddr()
-            .write(|w| unsafe { w.dbaddr().bits(prep.start.addr() as u32) });
+        self.sdmmc.dma_prepare(prep.start, block_size, data_size);
         self.sdmmc.enable_dma(true);
         self.dma_resume();
     }
